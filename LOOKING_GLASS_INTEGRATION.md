@@ -4,7 +4,24 @@ This document describes how to integrate IWER (Immersive Web Emulation Runtime) 
 
 ## Summary
 
-Successfully replaced the WebXR polyfill in Looking Glass' WebXR library with IWER. The integration required minimal code changes and the library builds successfully.
+Successfully replaced the WebXR polyfill in Looking Glass' WebXR library with IWER. The integration required custom multi-view rendering support, as Looking Glass displays require 45-48 views (not the standard 2 stereo views). The library builds successfully and provides proper multi-view WebXR support.
+
+## Multi-View Architecture Challenge
+
+### The Problem
+
+Standard WebXR (and IWER) is designed for stereo VR headsets with 2 views (left and right eye). Looking Glass holographic displays require **45-48 views** arranged in a quilt pattern to create the holographic effect.
+
+- **IWER's XRFrame.getViewerPose()**: Returns 2 XRView objects (left/right)
+- **Looking Glass needs**: 45-48 XRView objects (multi-perspective lightfield)
+
+### The Solution
+
+Created custom WebXR classes that bridge IWER's API with Looking Glass's multi-view requirements:
+
+1. **LookingGlassXRFrame** - Overrides `getViewerPose()` to return 45-48 views
+2. **LookingGlassXRSession** - Creates custom frames and manages animation loop
+3. **LookingGlassXRSystem** - Creates custom sessions and coordinates with device
 
 ## Changes Made
 
@@ -75,11 +92,74 @@ const config = {
 }
 ```
 
+### 6. Created Custom Multi-View Classes
+
+#### LookingGlassXRFrame.ts
+Custom XRFrame that overrides `getViewerPose()` to create 45-48 XRView objects:
+
+```typescript
+getViewerPose(referenceSpace: XRReferenceSpace): XRViewerPose {
+  const viewSpaces = device.getViewSpaces('immersive-vr'); // Gets 48 view spaces
+
+  const views: XRView[] = [];
+  for (let i = 0; i < viewSpaces.length; i++) {
+    const projectionMatrix = device.getProjectionMatrix(null, i);
+    const viewMatrix = device._getViewMatrixByIndex(i);
+    const transform = this.createTransformFromMatrix(viewMatrix);
+    views.push(new XRView('none', projectionMatrix, transform, session));
+  }
+
+  return new XRViewerPose(baseTransform, views, false);
+}
+```
+
+#### LookingGlassXRSession.ts
+Custom XRSession that:
+- Creates LookingGlassXRFrame instances in requestAnimationFrame
+- Manages Looking Glass device's internal session ID
+- Calls device.onFrameStart() and device.onFrameEnd() for each frame
+
+#### LookingGlassXRSystem.ts
+Custom XRSystem that:
+- Calls device.requestSession() to get internal session ID
+- Creates LookingGlassXRSession wrapper
+- Tracks active sessions
+
 ## Build Results
 
-The library builds successfully:
-- `dist/webxr.js` - ES module build (39.54 KiB)
-- `dist/webxr.umd.cjs` - UMD build (31.50 KiB)
+The library builds successfully with multi-view support:
+- `dist/webxr.js` - ES module build (43.79 KiB)
+- `dist/webxr.umd.cjs` - UMD build (34.67 KiB)
+
+## How Multi-View Rendering Works
+
+### Frame Flow
+
+1. **Application calls** `session.requestAnimationFrame(callback)`
+2. **LookingGlassXRSession** schedules frame via device's rAF
+3. **Device calls** `onFrameStart()` to compute 48 view/projection matrices
+4. **LookingGlassXRFrame** created with session and passed to callback
+5. **Application calls** `frame.getViewerPose(refSpace)`
+6. **LookingGlassXRFrame** returns XRViewerPose with 48 XRView objects
+7. **Application renders** each view to corresponding viewport in quilt
+8. **Device calls** `onFrameEnd()` to composite quilt to display
+
+### View Matrix Calculation
+
+Looking Glass computes view matrices for each of the 48 camera positions:
+
+```javascript
+// Each view is offset along a baseline (horizontal arc)
+for (let i = 0; i < 48; i++) {
+  const fraction = (i + 0.5) / 48 - 0.5;  // -0.5 to 0.5
+  const angle = viewCone * fraction;
+  const offset = focalDistance * Math.tan(angle);
+
+  // Translate camera along baseline
+  const viewMatrix = translate(basePose, [offset, 0, 0]);
+  const projectionMatrix = computeAsymmetricFrustum(offset, ...);
+}
+```
 
 ## Testing
 
